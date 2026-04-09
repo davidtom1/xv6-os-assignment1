@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "proc.c"
 
 uint64
 sys_exit(void)
@@ -88,4 +89,52 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// pass the CPU for other process (for it's co_yield)
+// return the value from the target process
+uint64
+sys_co_yield(void)
+{
+  int target_pid;
+  int value;
+  struct proc *p;
+  struct proc *curr_proc = myproc();
+
+  argint(0, &target_pid);
+  argint(1, &value);
+
+  if (target_pid < 1 || target_pid == curr_proc->pid) {
+    return -1;
+  }
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    // if it's the target, it's sleeping and the target called co_yield on me
+    // the casting to void* is for the comparison to chan
+    if (p->pid == target_pid) {
+      if (p->state == SLEEPING && p->chan == (void*)(uint64)curr_proc->pid) {
+        p->trapframe->a0 = value;
+        acquire(&curr_proc->lock);
+        curr_proc->chan = (void*)(uint64)target_pid;
+        curr_proc->state = SLEEPING;
+        p->state = RUNNING;
+
+        swtch(&curr_proc->context, &p->context);
+        release(&curr_proc->lock);
+        release(&p->lock);
+        return curr_proc->trapframe->a0;
+      }
+      release(&p->lock);
+      break;
+    }
+    release(&p->lock);
+  }
+
+  acquire(&curr_proc->lock);
+  curr_proc->chan = (void*)(uint64)target_pid;
+  curr_proc->state = SLEEPING;
+  sched();
+  release(&curr_proc->lock);
+  return curr_proc->trapframe->a0;
 }
