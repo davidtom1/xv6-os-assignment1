@@ -101,6 +101,7 @@ sys_co_yield(void)
   struct proc *p;
   struct proc *curr_proc = myproc();
 
+  // extract arguments from user space
   argint(0, &target_pid);
   argint(1, &value);
 
@@ -110,9 +111,8 @@ sys_co_yield(void)
 
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
-    // if it's the target, it's sleeping and the target called co_yield on me
-    // the casting to void* is for the comparison to chan
     if (p->pid == target_pid) {
+      // check if target is already waiting for co_yield with us
       if (p->state == SLEEPING && p->chan == (void*)(uint64)curr_proc->pid) {
         p->trapframe->a0 = value;
         acquire(&curr_proc->lock);
@@ -120,17 +120,20 @@ sys_co_yield(void)
         curr_proc->state = SLEEPING;
         p->state = RUNNING;
 
+        // direct context switch from current process to target process
         swtch(&curr_proc->context, &p->context);
         release(&curr_proc->lock);
         release(&p->lock);
         return curr_proc->trapframe->a0;
       }
+      // target found but not ready for co_yield, release and stop searching
       release(&p->lock);
       break;
     }
     release(&p->lock);
   }
 
+  // target not ready/found
   acquire(&curr_proc->lock);
   curr_proc->chan = (void*)(uint64)target_pid;
   curr_proc->state = SLEEPING;
