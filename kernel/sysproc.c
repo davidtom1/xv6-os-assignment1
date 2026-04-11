@@ -5,7 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
-#include "proc.c"
+
 
 uint64
 sys_exit(void)
@@ -96,48 +96,61 @@ sys_uptime(void)
 uint64
 sys_co_yield(void)
 {
+  extern struct proc proc[];
   int target_pid;
   int value;
+  int found = 0;
   struct proc *p;
   struct proc *curr_proc = myproc();
-
-  // extract arguments from user space
   argint(0, &target_pid);
   argint(1, &value);
 
-  if (target_pid < 1 || target_pid == curr_proc->pid) {
+  if (target_pid <= 0 || target_pid == curr_proc->pid || value < 0)
     return -1;
-  }
+
+  // Mark ourselves as sleeping BEFORE searching for the target.
+  // This closes the race where the target runs between us releasing its lock
+  // and us calling sched(), sees us not sleeping, and goes to sleep itself —
+  // leaving both processes sleeping with nobody to wake either.
+  acquire(&curr_proc->lock);
+  curr_proc->chan = (void*)(uint64)target_pid;
+  curr_proc->state = SLEEPING;
 
   for (p = proc; p < &proc[NPROC]; p++) {
+    if (p == curr_proc) continue;  // already hold our own lock; can't re-acquire
     acquire(&p->lock);
     if (p->pid == target_pid) {
-      // check if target is already waiting for co_yield with us
-      if (p->state == SLEEPING && p->chan == (void*)(uint64)curr_proc->pid) {
-        p->trapframe->a0 = value;
-        acquire(&curr_proc->lock);
-        curr_proc->chan = (void*)(uint64)target_pid;
-        curr_proc->state = SLEEPING;
-        p->state = RUNNING;
-
-        // direct context switch from current process to target process
-        swtch(&curr_proc->context, &p->context);
-        release(&curr_proc->lock);
+      found = 1;
+      if (p->killed) {
+        // Undo sleep setup and bail out.
+        curr_proc->chan = 0;
+        curr_proc->state = RUNNING;
         release(&p->lock);
-        return curr_proc->trapframe->a0;
+        release(&curr_proc->lock);
+        return -1;
       }
-      // target found but not ready for co_yield, release and stop searching
+      if (p->state == SLEEPING && p->chan == (void*)(uint64)curr_proc->pid) {
+        // Target is waiting for us: deliver our value and make it runnable.
+        // The scheduler will resume it; we sleep via sched() below.
+        p->trapframe->a0 = value;
+        p->state = RUNNABLE;
+      }
       release(&p->lock);
       break;
     }
     release(&p->lock);
   }
 
-  // target not ready/found
-  acquire(&curr_proc->lock);
-  curr_proc->chan = (void*)(uint64)target_pid;
-  curr_proc->state = SLEEPING;
+  if (!found) {
+    curr_proc->chan = 0;
+    curr_proc->state = RUNNING;
+    release(&curr_proc->lock);
+    return -1;
+  }
+
+  // Sleep until the target calls co_yield back to us and sets our return value.
   sched();
+  curr_proc->chan = 0;
   release(&curr_proc->lock);
   return curr_proc->trapframe->a0;
 }
