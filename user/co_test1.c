@@ -54,10 +54,29 @@ void test_self_yield(void) {
     printf("\n");
 }
 
+void test_invalid_arguments(void) {
+    printf("=== test_invalid_arguments ===\n");
+
+    int result = co_yield(0, 1);
+    if (result == -1)
+        printf("PASS: co_yield to PID 0 returned -1\n");
+    else
+        printf("FAIL: expected -1 for PID 0, got %d\n", result);
+
+    result = co_yield(99999, -1);
+    if (result == -1)
+        printf("PASS: co_yield with negative value returned -1\n");
+    else
+        printf("FAIL: expected -1 for negative value, got %d\n", result);
+
+    printf("\n");
+}
+
 int main(void) {
     test_nonexistent_pid();
     test_killed_process();
     test_self_yield();
+    test_invalid_arguments();
     printf("all tests done\n");
     exit(0);
 }

@@ -121,7 +121,7 @@ sys_co_yield(void)
     acquire(&p->lock);
     if (p->pid == target_pid) {
       found = 1;
-      if (p->killed) {
+      if (p->killed || p->state == ZOMBIE) {
         // Undo sleep setup and bail out.
         curr_proc->chan = 0;
         curr_proc->state = RUNNING;
@@ -151,6 +151,10 @@ sys_co_yield(void)
   // Sleep until the target calls co_yield back to us and sets our return value.
   sched();
   curr_proc->chan = 0;
+  if (curr_proc->killed) {
+    release(&curr_proc->lock);
+    return -1;
+  }
   release(&curr_proc->lock);
   return curr_proc->trapframe->a0;
 }
