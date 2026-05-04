@@ -147,24 +147,22 @@ sys_co_yield(void)
 
     release(&curr->lock);
 
+    // saves the inturupt enable state of the current process, so that when we switch back to it, we can restore it.
     int intena = mycpu()->intena;
+
     swtch(&curr->context, &target->context);
     mycpu()->intena = intena;
 
-    // Resumed here when someone yields back to us via the same direct path.
+    // Resumed here when someone yields back to us.
     // They held curr->lock when swtching in, so we hold it now.
     int killed = curr->killed;
-    int ret    = curr->trapframe->a0;
+    int ret = curr->trapframe->a0;
     release(&curr->lock);
     return killed ? -1 : ret;
   }
 
-  // ---------------------------------------------------------------
-  // EDGE PATH: target isn't ready (RUNNABLE, or sleeping on something
-  // else). Fall back to standard scheduler-based sleep. sched() ONLY here.
-  // When target eventually reaches its co_yield, IT will hit the happy
-  // path and direct-swtch into us.
-  // ---------------------------------------------------------------
+  // EDGE PATH: target isn't ready (RUNNABLE, or sleeping on something else). Fall back to standard scheduler-based sleep sched().
+  // We hold target->lock, but not curr->lock.
   release(&target->lock);
 
   acquire(&curr->lock);
@@ -172,12 +170,12 @@ sys_co_yield(void)
     release(&curr->lock); 
     return -1; 
   }
-
+  
   curr->chan  = (void*)(uint64)target_pid;
   curr->state = SLEEPING;
 
   sched();   // <-- only call site
-
+  // After sched(), we are rescheduled back to run by someone else. We hold curr->lock when swtching in, so we hold it now.
   curr->chan = 0;
   if (curr->killed) { 
     release(&curr->lock); 
