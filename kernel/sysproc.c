@@ -97,64 +97,93 @@ uint64
 sys_co_yield(void)
 {
   extern struct proc proc[];
-  int target_pid;
+  int target_pid; 
   int value;
-  int found = 0;
   struct proc *p;
-  struct proc *curr_proc = myproc();
+  struct proc *target = 0;
+  struct proc *curr = myproc();
+
   argint(0, &target_pid);
   argint(1, &value);
 
-  if (target_pid <= 0 || target_pid == curr_proc->pid || value < 0)
+  if (target_pid <= 0 || target_pid == curr->pid || value < 0)
     return -1;
 
-  // Mark ourselves as sleeping BEFORE searching for the target.
-  // This closes the race where the target runs between us releasing its lock
-  // and us calling sched(), sees us not sleeping, and goes to sleep itself —
-  // leaving both processes sleeping with nobody to wake either.
-  acquire(&curr_proc->lock);
-  curr_proc->chan = (void*)(uint64)target_pid;
-  curr_proc->state = SLEEPING;
-
+  // Locate target and hld its lock.
   for (p = proc; p < &proc[NPROC]; p++) {
-    if (p == curr_proc) continue;  // already hold our own lock; can't re-acquire
+    if (p == curr) 
+      continue;
     acquire(&p->lock);
     if (p->pid == target_pid) {
-      found = 1;
-      if (p->killed || p->state == ZOMBIE) {
-        // Undo sleep setup and bail out.
-        curr_proc->chan = 0;
-        curr_proc->state = RUNNING;
-        release(&p->lock);
-        release(&curr_proc->lock);
-        return -1;
-      }
-      if (p->state == SLEEPING && p->chan == (void*)(uint64)curr_proc->pid) {
-        // Target is waiting for us: deliver our value and make it runnable.
-        // The scheduler will resume it; we sleep via sched() below.
-        p->trapframe->a0 = value;
-        p->state = RUNNABLE;
-      }
-      release(&p->lock);
+      target = p;
       break;
     }
     release(&p->lock);
   }
+  
+  if (target == 0)
+    return -1;
 
-  if (!found) {
-    curr_proc->chan = 0;
-    curr_proc->state = RUNNING;
-    release(&curr_proc->lock);
+  if (target->killed || target->state == ZOMBIE) {
+    release(&target->lock);
     return -1;
   }
 
-  // Sleep until the target calls co_yield back to us and sets our return value.
-  sched();
-  curr_proc->chan = 0;
-  if (curr_proc->killed) {
-    release(&curr_proc->lock);
-    return -1;
+  // Target is already sleeping & waiting for us - direct context switch
+  if (target->state == SLEEPING && target->chan == (void*)(uint64)curr->pid) {
+    acquire(&curr->lock);
+
+    // Hand value to target to its trapframe.
+    target->trapframe->a0 = value;
+    target->state = RUNNING;        
+    target->chan  = 0;
+
+    // Curr sleeps on target_pid; whoever yields back to curr will find curr here.
+    curr->state = SLEEPING;
+    curr->chan  = (void*)(uint64)target_pid;
+
+    // Tell the CPU it's now running target.
+    mycpu()->proc = target;
+
+    release(&curr->lock);
+
+    int intena = mycpu()->intena;
+    swtch(&curr->context, &target->context);
+    mycpu()->intena = intena;
+
+    // Resumed here when someone yields back to us via the same direct path.
+    // They held curr->lock when swtching in, so we hold it now.
+    int killed = curr->killed;
+    int ret    = curr->trapframe->a0;
+    release(&curr->lock);
+    return killed ? -1 : ret;
   }
-  release(&curr_proc->lock);
-  return curr_proc->trapframe->a0;
+
+  // ---------------------------------------------------------------
+  // EDGE PATH: target isn't ready (RUNNABLE, or sleeping on something
+  // else). Fall back to standard scheduler-based sleep. sched() ONLY here.
+  // When target eventually reaches its co_yield, IT will hit the happy
+  // path and direct-swtch into us.
+  // ---------------------------------------------------------------
+  release(&target->lock);
+
+  acquire(&curr->lock);
+  if (curr->killed) { 
+    release(&curr->lock); 
+    return -1; 
+  }
+
+  curr->chan  = (void*)(uint64)target_pid;
+  curr->state = SLEEPING;
+
+  sched();   // <-- only call site
+
+  curr->chan = 0;
+  if (curr->killed) { 
+    release(&curr->lock); 
+    return -1; 
+  }
+  uint64 ret = curr->trapframe->a0;
+  release(&curr->lock);
+  return ret;
 }
